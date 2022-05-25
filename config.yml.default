@@ -5,7 +5,7 @@ engine:                                   # Engine settings.
   name: "stockfish"                       # Binary name of the engine to use.
   ponder: true                            # Think on opponent's time.
   opening_books:
-    enabled: true                         # Activate opening books.
+    enabled:false                         # Activate opening books.
     books:
 #     white:                              # List of names of books to use as white.
 #       - "WhiteBook"
