@@ -5,14 +5,15 @@ engine:                                   # Engine settings.
   name: "stockfish"                       # Binary name of the engine to use.
   ponder: true                            # Think on opponent's time.
   opening_books:
-    enabled: false                        # Activate opening books.
+    enabled: true                         # Activate opening books.
     books:
 #     white:                              # List of names of books to use as white.
-#       - "WhiteBook"
+#       -  "Perfect"
+        -   "Goi" 
 #     black:                              # List of names of books to use as black.
 #       - "BlackBook"
       standard:                           # List of names of books to use if there is no specific book for white, black or chess960.
-        - "DefaultBook" 
+        - "Cerebellum" 
 #     chess960:                           # List of names of books to use for Chess960.
 #       - "Chess960Book"
     selection: "weighted_random"          # Move selection is one of "weighted_random", "uniform_random" or "best_move".
@@ -92,4 +93,6 @@ matchmaking:
 # max_rating_diff: 300                    # Maximum rating distance to opponent. (Commenting allowed)
 
 books:                                    # Names of the opening books (to be used above in the opening_books section) and paths to the opening books.
-  DefaultBook: "/path/to/DefaultBook.bin"
+ Goi: "./engines/Goi.bin"
+  Perfect: "/home/Books/Perfect2021.bin"
+  Cerebellum: "Cerebellum.bin"
