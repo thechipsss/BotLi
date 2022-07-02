@@ -18,6 +18,8 @@ class Game(Thread):
         self.ping_counter = 0
         self.game_queue = Queue()
         self.was_aborted = False
+        self.is_started = False
+        self.abortion_counter = 0
 
     def start(self):
         Thread.start(self)
@@ -30,8 +32,12 @@ class Game(Thread):
             event = self.game_queue.get()
 
             if event['type'] == 'gameFull':
-                print(f'Game "{self.game_id}" was started.')
-                self.lichess_game = Lichess_Game(self.api, event, self.config)
+                if not self.is_started:
+                    print(f'Game "{self.game_id}" was started.')
+                    self.lichess_game = Lichess_Game(self.api, event, self.config)
+                    self.is_started = True
+                else:
+                    self.lichess_game.update(event['state'])
 
                 if self.lichess_game.is_our_turn():
                     uci_move, offer_draw, resign = self.lichess_game.make_move()
@@ -75,7 +81,11 @@ class Game(Thread):
                 self.ping_counter += 1
 
                 if self.ping_counter >= 7 and self.lichess_game.is_abortable() and not self.lichess_game.is_our_turn():
+                    if self.abortion_counter >= 3:
+                        break
+
                     self.api.abort_game(self.game_id)
+                    self.abortion_counter += 1
             else:
                 print(event)
 

@@ -1,4 +1,3 @@
-import pickle
 from typing import Tuple
 
 import chess
@@ -28,11 +27,11 @@ class Lichess_Game:
         self.status = Game_Status(gameFull_event['state']['status'])
         self.draw_enabled: bool = config['engine']['offer_draw']['enabled']
         self.resign_enabled: bool = config['engine']['resign']['enabled']
+        self.ponder_enabled: bool = self.config['engine']['ponder']
         self.move_overhead = self._get_move_overhead()
         self.out_of_book_counter = 0
         self.out_of_cloud_counter = 0
         self.out_of_chessdb_counter = 0
-        self.loaded_pybooks: dict[str, dict[int, str]] = {}
         self.engine = self._get_engine()
         self.scores: list[chess.engine.PovScore] = []
         self.last_message = 'No eval available yet.'
@@ -42,6 +41,7 @@ class Lichess_Game:
             message = f'Book:    {self._format_move(move):14}'
             offer_draw = False
             resign = False
+            engine_move = False
         elif response := self._make_cloud_move():
             uci_move, cp_score, depth = response
             move = chess.Move.from_uci(uci_move)
@@ -49,26 +49,32 @@ class Lichess_Game:
             message = f'Cloud:   {self._format_move(move):14} {self._format_score(pov_score)}     {depth}'
             offer_draw = False
             resign = False
+            engine_move = False
         elif uci_move := self._make_chessdb_move():
             move = chess.Move.from_uci(uci_move)
             message = f'ChessDB: {self._format_move(move):14}'
             offer_draw = False
             resign = False
+            engine_move = False
         elif response := self._make_egtb_move():
             uci_move, outcome, offer_draw, resign = response
             offer_draw = offer_draw and self.draw_enabled
             resign = resign and self.resign_enabled
             move = chess.Move.from_uci(uci_move)
             message = f'EGTB:    {self._format_move(move):14} {outcome}'
+            engine_move = False
         else:
             move, info = self._make_engine_move()
             message = f'Engine:  {self._format_move(move):14} {self._format_info(info)}'
             offer_draw = self._is_drawish()
             resign = self._is_resignable()
+            engine_move = True
 
         print(message)
         self.last_message = message
         self.board.push(move)
+        if not engine_move and self.ponder_enabled:
+            self.engine.analysis(self.board)
         return move.uci(), offer_draw, resign
 
     def update(self, gameState_event: dict) -> bool:
@@ -166,25 +172,35 @@ class Lichess_Game:
 
     def _make_book_move(self) -> chess.Move | None:
         enabled = self.config['engine']['opening_books']['enabled']
-        selection = self.config['engine']['opening_books']['selection']
-        too_deep = self.board.ply() >= self.config['engine']['opening_books'].get('max_depth', float('inf'))
-        out_of_book = self.out_of_book_counter >= 10
 
-        if not enabled or out_of_book or too_deep:
+        if not enabled:
             return
 
-        for book in self._get_books():
-            if book.lower().endswith('.pybook'):
-                move = self._get_pybook_move(book)
-            else:
-                move = self._get_polyglot_move(book, selection)
+        out_of_book = self.out_of_book_counter >= 10
+        max_depth = self.config['engine']['opening_books'].get('max_depth', float('inf'))
+        too_deep = self.board.ply() >= max_depth
 
-            if move:
-                self.out_of_book_counter = 0
-                new_board = self.board.copy()
-                new_board.push(move)
-                if not new_board.is_repetition(count=2):
-                    return move
+        if out_of_book or too_deep:
+            return
+
+        selection = self.config['engine']['opening_books']['selection']
+        for book in self._get_books():
+            with chess.polyglot.open_reader(book) as book_reader:
+                try:
+                    if selection == 'weighted_random':
+                        move = book_reader.weighted_choice(self.board).move
+                    elif selection == 'uniform_random':
+                        move = book_reader.choice(self.board).move
+                    else:
+                        move = book_reader.find(self.board).move
+
+                    self.out_of_book_counter = 0
+                    new_board = self.board.copy()
+                    new_board.push(move)
+                    if not new_board.is_repetition(count=2):
+                        return move
+                except IndexError:
+                    pass
 
         self.out_of_book_counter += 1
 
@@ -200,26 +216,6 @@ class Lichess_Game:
                 return books['black']
 
         return books['standard'] if 'standard' in books else []
-
-    def _get_pybook_move(self, book: str) -> chess.Move | None:
-        if book not in self.loaded_pybooks:
-            with open(book, 'rb') as input:
-                self.loaded_pybooks[book] = pickle.load(input)
-
-        if uci_move := self.loaded_pybooks[book].get(chess.polyglot.zobrist_hash(self.board)):
-            return chess.Move.from_uci(uci_move)
-
-    def _get_polyglot_move(self, book: str, selection: str) -> chess.Move | None:
-        with chess.polyglot.open_reader(book) as book_reader:
-            try:
-                if selection == 'weighted_random':
-                    return book_reader.weighted_choice(self.board).move
-                elif selection == 'uniform_random':
-                    return book_reader.choice(self.board).move
-                else:
-                    return book_reader.find(self.board).move
-            except IndexError:
-                return
 
     def _make_cloud_move(self) -> Tuple[UCI_Move, CP_Score, Depth] | None:
         enabled = self.config['engine']['online_moves']['lichess_cloud']['enabled']
@@ -284,20 +280,25 @@ class Lichess_Game:
             self._reduce_own_time(timeout * 1000)
 
     def _make_egtb_move(self) -> Tuple[UCI_Move, Outcome, Offer_Draw, Resign] | None:
-        if not self.config['engine']['online_moves']['online_egtb']['enabled']:
+        enabled = self.config['engine']['online_moves']['online_egtb']['enabled']
+
+        if not enabled:
             return
 
         is_endgame = chess.popcount(self.board.occupied) <= 7
         has_time = self._has_time(self.config['engine']['online_moves']['online_egtb']['min_time'])
+
+        if not is_endgame or not has_time:
+            return
+
         timeout = self.config['engine']['online_moves']['online_egtb']['timeout']
 
-        if is_endgame and has_time:
-            if response := self.api.get_egtb(self.board.fen(), timeout):
-                uci_move = response['moves'][0]['uci']
-                outcome = response['category']
-                return uci_move, outcome, outcome == 'draw', outcome == 'loss'
-            else:
-                self._reduce_own_time(timeout * 1000)
+        if response := self.api.get_egtb(self.board.fen(), timeout):
+            uci_move = response['moves'][0]['uci']
+            outcome = response['category']
+            return uci_move, outcome, outcome == 'draw', outcome == 'loss'
+        else:
+            self._reduce_own_time(timeout * 1000)
 
     def _make_engine_move(self) -> Tuple[chess.Move, chess.engine.InfoDict]:
         if len(self.board.move_stack) < 2:
@@ -316,7 +317,7 @@ class Lichess_Game:
 
             limit = chess.engine.Limit(white_clock=white_time, white_inc=increment,
                                        black_clock=black_time, black_inc=increment)
-            ponder = self.config['engine']['ponder']
+            ponder = self.ponder_enabled
 
         result = self.engine.play(self.board, limit, info=chess.engine.INFO_ALL, ponder=ponder)
         if result.move:
@@ -393,7 +394,7 @@ class Lichess_Game:
 
     def _get_move_overhead(self) -> int:
         multiplier = self.config.get('move_overhead_multiplier', 1.0)
-        return int(self.initial_time / 60 * multiplier)
+        return max(int(self.initial_time / 60 * multiplier), 1000)
 
     def _has_time(self, min_time: int) -> bool:
         min_time *= 1000
